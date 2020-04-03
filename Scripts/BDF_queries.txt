@@ -1,0 +1,228 @@
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+--SESSION CONFIGURATION SETTINGS
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+--(128*1024*1024 = 134217728)
+SET hive.exec.orc.default.block.size=134217728;
+
+-- OPTMIZATIONS
+-- PARTITIONS
+SET hive.exec.dynamic.partition=true;
+SET hive.exec.dynamic.partition.mode=nonstrict;
+SET hive.exec.max.dynamic.partitions.pernode=300;
+SET optimize.sort.dynamic.partitioning=true;
+
+-- BUCKETING
+SET hive.enforce.bucketing=true;
+SET hive.enforce.sorting=true;
+
+-- VECTORIZATION
+SET hive.vectorized.execution.enabled=true;
+SET hive.vectorized.execution.reduce.enabled=true;
+SET hive.vectorized.input.format.excludes=;
+
+-- COST-BASED OPTIMIZATION
+SET hive.cbo.enable=true;
+SET hive.compute.query.using.stats=true;
+SET hive.stats.fetch.column.stats=true;
+SET hive.stats.fetch.partition.stats=true;
+
+
+USE ml20m;
+
+-- Create an Internal table: ml20m.PBIMovieRatingCountGenre
+-- What are the movie genres in the dataset?
+-- What is the number of movies per genre?
+-- What is the average movie rating per genre? 
+-- Average movie Rating and Count by Genre
+DROP TABLE IF EXISTS ml20m.PBIMovieRatingCountGenre;
+
+CREATE TABLE ml20m.PBIMovieRatingCountGenre
+(
+    genres STRING,
+     MovieCount INT,
+      AvgRatingbyGenre FLOAT
+)
+COMMENT 'MovieRatingCountGenre table'
+STORED AS ORC;
+
+
+INSERT OVERWRITE TABLE ml20m.PBIMovieRatingCountGenre 
+    SELECT m.genre, 
+     count(DISTINCT m.movieid) as MovieCount, 
+      avg(rAvg.AvgRatingbyMovie) as AvgRatingbyGenre
+      --   min(rAvg.AvgRatingbyMovie) as MinRatingByGenre,
+      --    percentile_approx(rAvg.AvgRatingbyMovie,0.25) as Q1RatingByGenre,
+      --     percentile_approx(rAvg.AvgRatingbyMovie,0.5) as Q2RatingByGenre,
+      --      percentile_approx(rAvg.AvgRatingbyMovie,0.75) as Q3RatingByGenre, 
+      --       max(rAvg.AvgRatingbyMovie) as MaxRatingByGenre
+    FROM ml20m.movies as m
+    LEFT JOIN (SELECT r.movieid, avg(r.rating) as AvgRatingbyMovie FROM ml20m.ratings as r GROUP BY r.movieid) as rAvg 
+     ON m.movieid = rAvg.movieid 
+    GROUP BY m.genre ORDER BY AvgRatingbyGenre DESC;
+
+
+-- Create an Internal table: ml20m.PBIAvgMovieRatingbyGenre
+-- What is the average movie rating distribution per genre?
+-- Boxplot Average movie Rating by Genre
+DROP TABLE IF EXISTS ml20m.PBIAvgMovieRatingbyGenre;
+
+CREATE TABLE ml20m.PBIAvgMovieRatingbyGenre
+(
+    movieid INT,
+     AvgRatingbyMovie FLOAT
+)
+COMMENT 'Average Movie Rating by Genre table'
+PARTITIONED BY (genre STRING)
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 1 BUCKETS
+STORED AS ORC;
+
+INSERT OVERWRITE TABLE ml20m.PBIAvgMovieRatingbyGenre PARTITION(genre)
+    SELECT m.movieid,
+     rAvg.AvgRatingbyMovie as AvgRatingbyMovie,
+      m.genre
+    FROM ml20m.movies as m
+    LEFT JOIN (SELECT r.movieid, avg(r.rating) as AvgRatingbyMovie FROM ml20m.ratings as r GROUP BY r.movieid) as rAvg
+     ON m.movieid = rAvg.movieid;
+ 
+
+-- Create an Internal table: ml20m.PBIMovieRatingPerUser
+-- What is the movie rating distribution per user?
+-- Average movie Rating by User
+DROP TABLE IF EXISTS ml20m.PBIMovieRatingPerUser;
+
+CREATE TABLE ml20m.PBIMovieRatingPerUser
+(
+    userid INT,
+     AvgRatingByUser FLOAT,
+      NumberofRates INT
+)
+COMMENT 'Average movie Rating by User table'
+CLUSTERED BY (userid) SORTED BY (userid ASC) INTO 1 BUCKETS
+STORED AS ORC;
+
+INSERT OVERWRITE TABLE ml20m.PBIMovieRatingPerUser
+    SELECT r.userid,
+     avg(r.rating) as AvgRatingByUser,
+      count(r.userid) as NumberofRates
+    FROM ml20m.ratings as r
+    GROUP BY r.userid
+    ORDER BY AvgRatingByUser DESC;
+
+
+-- Create an Internal table: ml20m.PBITopTagsPerMovie
+-- What are the top 10 tags per movie? 
+-- Top tags per movie
+DROP TABLE IF EXISTS ml20m.PBITopTagsPerMovie;
+
+CREATE TABLE ml20m.PBITopTagsPerMovie
+(
+    movieid INT,
+     TagIdListbyMovie ARRAY<INT>,
+      TagListbyMovie ARRAY<STRING>,
+       RelevanceListbyMovie ARRAY<FLOAT>
+)
+COMMENT 'Top Tags per Movie table'
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 1 BUCKETS
+STORED AS ORC;
+
+INSERT OVERWRITE TABLE ml20m.PBITopTagsPerMovie
+    SELECT gs_tagrank.movieid,
+     collect_list(gs_tagrank.tagid) as TagIdListbyMovie,
+      collect_list(gs_tagrank.tag) as TagListbyMovie,
+       collect_list(gs_tagrank.relevance) as RelevanceListbyMovie
+    FROM(
+        SELECT gs.movieid, 
+                gs.tagid, 
+                 gt.tag,
+                  gs.relevance, 
+                   rank() over (partition by gs.movieid ORDER BY gs.relevance Desc) as rk 
+        FROM ml20m.genome_scores as gs 
+        LEFT JOIN ml20m.genome_tags as gt ON gs.tagid = gt.tagid
+    ) as gs_tagrank
+    WHERE gs_tagrank.rk<=10 
+    GROUP BY gs_tagrank.movieid;
+
+    
+-- Create an Internal table: ml20m.PBITopTagsPerGenre
+-- What are the top 30 tags per genre? 
+-- Top tags per genre
+DROP TABLE IF EXISTS ml20m.PBITopTagsPerGenre;
+
+CREATE TABLE ml20m.PBITopTagsPerGenre
+(
+    TagListIdbyGenre ARRAY<INT>,
+     TagListbyGenre ARRAY<STRING>,
+      RelevanceListbyGenre ARRAY<FLOAT>
+)
+COMMENT 'Top Tags per Genre table'
+PARTITIONED BY (genre STRING)
+STORED AS ORC;
+
+INSERT OVERWRITE TABLE ml20m.PBITopTagsPerGenre PARTITION(genre)
+    SELECT
+     collect_list(gs_tagrank.tagid) as TagListIdbyGenre, 
+      collect_list(gs_tagrank.tag) as TagListbyGenre,
+       collect_list(gs_tagrank.relevance) as RelevanceListbyGenre,
+        gs_tagrank.genre
+    FROM(
+        SELECT m.genre, 
+         gs.movieid, 
+          gs.tagid, 
+           gt.tag,
+            gs.relevance, 
+             rank() over (partition by m.genre ORDER BY gs.relevance Desc) as rk 
+        FROM ml20m.genome_scores as gs 
+         LEFT JOIN ml20m.movies as m ON gs.movieid = m.movieid
+         LEFT JOIN ml20m.genome_tags as gt ON gs.tagid = gt.tagid
+    ) as gs_tagrank
+    WHERE gs_tagrank.rk<=30
+    GROUP BY gs_tagrank.genre;
+
+
+
+
+
+-- Create an Internal table: ml20m.TopMoviesPerYear
+-- What are the top 20 movies per year?
+-- Top movies per year
+DROP TABLE IF EXISTS ml20m.PBITopMoviesPerYear;
+
+CREATE TABLE ml20m.PBITopMoviesPerYear
+(
+    Title STRING,
+     movieId INT,
+      AvgRatingbyUser DOUBLE,
+       RankMovie INT
+)
+COMMENT 'Top Movies per Year'
+PARTITIONED BY (YearMovie INT)
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 1 BUCKETS
+STORED AS ORC;
+
+INSERT OVERWRITE TABLE ml20m.PBITopMoviesPerYear PARTITION(YearMovie)
+    SELECT topmoviesperyear.title,
+     topmoviesperyear.movieId,
+        topmoviesperyear.avgratingbymovie,
+         topmoviesperyear.rk,
+          topmoviesperyear.year
+    FROM
+    (
+        SELECT m.title,
+                m.year,
+                 moviesrating.*,
+                  rank() over (partition by m.year ORDER BY moviesrating.avgratingbymovie Desc) as rk
+        FROM 
+         (
+          SELECT r.movieId,
+           avg(r.rating) as avgratingbymovie
+          FROM ml20m.ratings as r 
+           GROUP BY r.movieId
+         )as moviesrating
+        LEFT JOIN ml20m.movies_raw as m ON moviesrating.movieId = m.movieId
+        WHERE m.year > 0
+    )as topmoviesperyear
+    WHERE topMoviesPerYear.rk<=20;
+
+

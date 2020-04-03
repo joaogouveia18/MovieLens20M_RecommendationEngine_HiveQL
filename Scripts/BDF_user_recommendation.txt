@@ -1,0 +1,144 @@
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+--SESSION CONFIGURATION SETTINGS
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+--(128*1024*1024 = 134217728)
+SET hive.exec.orc.default.block.size=134217728;
+
+-- OPTMIZATIONS
+-- PARTITIONS
+SET hive.exec.dynamic.partition=true;
+SET hive.exec.dynamic.partition.mode=nonstrict;
+SET hive.exec.max.dynamic.partitions.pernode=300;
+SET optimize.sort.dynamic.partitioning=true;
+
+-- BUCKETING
+SET hive.enforce.bucketing=true;
+SET hive.enforce.sorting=true;
+
+-- VECTORIZATION
+SET hive.vectorized.execution.enabled=true;
+SET hive.vectorized.execution.reduce.enabled=true;
+SET hive.vectorized.input.format.excludes=;
+
+-- COST-BASED OPTIMIZATION
+SET hive.cbo.enable=true;
+SET hive.compute.query.using.stats=true;
+SET hive.stats.fetch.column.stats=true;
+SET hive.stats.fetch.partition.stats=true;
+
+
+USE ml20m;
+--User Based Recommendation
+--What are the users' top movies recommended based on genre?
+
+--We decided to analyze only movies whose rating is greater than 4.0.
+DROP TABLE IF EXISTS ml20m.rec_user_rank_of_genre;
+CREATE TEMPORARY TABLE ml20m.rec_user_rank_of_genre as 
+	SELECT m.movieid, 
+     m.genre,
+      r.rating,
+       r.userid 
+    FROM ml20m.movies as m
+    LEFT JOIN ml20m.ratings as r 
+	 ON m.movieid = r.movieid 
+    WHERE r.rating >= 4;
+    
+    
+
+--In order to infer the favourite genres by user we computed the sum of ratings by genre of each user.
+DROP TABLE IF EXISTS ml20m.rec_user_totalrating_by_genre;
+CREATE TEMPORARY TABLE ml20m.rec_user_totalrating_by_genre as 
+    SELECT rr.userid,
+     rr.genre, 
+      sum(rr.rating) as total_rating 
+    FROM ml20m.rec_user_rank_of_genre as rr 
+    GROUP BY rr.userid, rr.genre;
+
+
+
+--We picked the 3 genres that registred the highest total sum of ratings.
+DROP TABLE IF EXISTS ml20m.rec_top3_genres_per_user;
+CREATE TEMPORARY TABLE ml20m.rec_top3_genres_per_user as  
+    SELECT top3.* 
+    FROM
+	(
+		SELECT tg.userid, 
+         tg.genre, 
+          row_number() over (partition by tg.userid order by tg.total_rating desc) as row_num 
+		FROM ml20m.rec_user_totalrating_by_genre as tg
+	) as top3 
+    WHERE top3.row_num <= 3;
+
+
+
+--Using the table ml20m.pbiavgmovieratingbygenre we decided to create a temporary table 
+--for the top 30 movies for each genre.
+DROP TABLE IF EXISTS ml20m.rec_top30movies_by_genre;
+CREATE TEMPORARY TABLE ml20m.rec_top30movies_by_genre as
+    SELECT top30.* 
+    FROM
+	(
+		SELECT pbi.genre, 
+         pbi.movieid, 
+          pbi.avgratingbymovie, 
+           row_number() over (partition by pbi.genre order by pbi.avgratingbymovie desc) as row_num 
+        FROM ml20m.pbiavgmovieratingbygenre as pbi
+	) as top30
+    WHERE top30.row_num <= 30;
+
+
+
+--We found the recommended top movies for each user. We filtered out the already seen movies by user.
+DROP TABLE IF EXISTS ml20m.rec_movie_avgrating_user_preference;
+CREATE TEMPORARY TABLE ml20m.rec_movie_avgrating_user_preference as
+	SELECT prf.*
+	FROM
+	(
+		SELECT DISTINCT top30.movieid, 
+		 top3.userid, 
+          top3.genre, 
+           top30.avgratingbymovie 
+		FROM ml20m.rec_top3_genres_per_user as top3
+		LEFT JOIN ml20m.rec_top30movies_by_genre as top30 
+		 ON top3.genre = top30.genre
+	) as prf
+	LEFT OUTER JOIN ml20m.ratings as r ON prf.userId = r.userID AND prf.movieId = r.movieId
+	WHERE r.UserID IS NULL;
+
+
+
+
+----View the user recommendation based on genre
+DROP TABLE IF EXISTS ml20m.rec_user_recommendation;
+CREATE TABLE ml20m.rec_user_recommendation
+(
+    userId INT,
+     movieId INT,
+      avgratingbymovie INT,
+       ranking INT,
+        title STRING
+)
+COMMENT 'user recommendation table'
+PARTITIONED BY (genre STRING)
+STORED as ORC;
+
+INSERT OVERWRITE TABLE ml20m.rec_user_recommendation PARTITION(genre)
+    SELECT blk.userid as userId,
+     blk.movieid as movieId,
+      blk.avgratingbymovie as avgratingbymovie,
+       blk.row_num as ranking,
+        m.title as title,
+         blk.genre as genre
+    FROM
+	(
+		SELECT rp.userid, 
+         rp.movieid,
+           rp.avgratingbymovie, 
+            row_number() over (partition by rp.userid order by rp.avgratingbymovie DESC) row_num,
+             rp.genre
+		FROM ml20m.rec_movie_avgrating_user_preference as rp
+    ) as blk
+    JOIN ml20m.movies_raw as m ON blk.movieid = m.movieid;
+    

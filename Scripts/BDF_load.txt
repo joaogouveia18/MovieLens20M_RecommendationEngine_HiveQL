@@ -1,0 +1,294 @@
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+--SESSION CONFIGURATION SETTINGS
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+--(128*1024*1024 = 134217728)
+SET hive.exec.orc.default.block.size=134217728;
+
+-- OPTMIZATIONS
+-- PARTITIONS
+SET hive.exec.dynamic.partition=true;
+SET hive.exec.dynamic.partition.mode=nonstrict;
+SET hive.exec.max.dynamic.partitions.pernode=300;
+SET optimize.sort.dynamic.partitioning=true;
+
+-- BUCKETING
+SET hive.enforce.bucketing=true;
+SET hive.enforce.sorting=true;
+
+-- VECTORIZATION
+SET hive.vectorized.execution.enabled=true;
+SET hive.vectorized.execution.reduce.enabled=true;
+SET hive.vectorized.input.format.excludes=;
+
+-- COST-BASED OPTIMIZATION
+SET hive.cbo.enable=true;
+SET hive.compute.query.using.stats=true;
+SET hive.stats.fetch.column.stats=true;
+SET hive.stats.fetch.partition.stats=true;
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+--DATA INGESTION + PRE-PROCESSING 
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+--Create the database
+DROP DATABASE IF EXISTS ml20m;
+CREATE DATABASE ml20m;
+USE ml20m;
+----------------------------------------------------------------------
+-- hadoop fs -rm -r -skipTrash /user/cloudera/BDF/ml20m/data/ratings.csv
+-- hdfs dfs -put /home/cloudera/Desktop/ml-20m/ratings.csv /user/cloudera/BDF/ml20m/data
+-- Import ratings.csv file
+DROP TABLE IF EXISTS ml20m.data_aux;
+--(load the data from the .csv file into an external temporary table)
+CREATE EXTERNAL TABLE ml20m.data_aux 
+(
+    userId INT,
+     movieId INT,
+      rating FLOAT,
+       unix_timestamp BIGINT
+)
+COMMENT 'Temporary Table:ratings'
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/user/cloudera/BDF/ml20m/data'
+TBLPROPERTIES ("skip.header.line.count"="1");
+
+--(move the external table to an internal Hive table)
+-- (to be created on /user/hive/warehouse/)
+DROP TABLE IF EXISTS ml20m.ratings;
+
+CREATE TABLE ml20m.ratings
+(
+    userId INT,
+     movieId INT,
+      rating FLOAT,
+       timestamp TIMESTAMP
+)
+COMMENT 'ratings table'
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 4 BUCKETS
+STORED AS ORC;
+
+INSERT OVERWRITE TABLE ml20m.ratings SELECT userId, movieId, rating, from_unixtime(unix_timestamp) as timestamp FROM ml20m.data_aux;
+
+----------------------------------------------------------------------
+-- hadoop fs -rm -r -skipTrash /user/cloudera/BDF/ml20m/data/ratings.csv
+-- hdfs dfs -put /home/cloudera/Desktop/ml-20m/tags.csv /user/cloudera/BDF/ml20m/data
+--Import tags.csv file
+DROP TABLE IF EXISTS ml20m.data_aux;
+--(load the data from the .csv file into an external temporary table)
+CREATE EXTERNAL TABLE ml20m.data_aux 
+(
+    userId INT,
+     movieId INT,
+      tag STRING,
+       unix_timestamp_str STRING
+)
+COMMENT 'Temporary Table:tags'
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+WITH SERDEPROPERTIES (
+"separatorChar" = ",",
+"quoteChar"="\"",
+"escapeChar"="\\"
+)
+STORED AS TEXTFILE
+LOCATION '/user/cloudera/BDF/ml20m/data'
+TBLPROPERTIES ("skip.header.line.count"="1");
+
+
+--(move the external table to an internal Hive table)
+-- (to be created on /user/hive/warehouse/)
+DROP TABLE IF EXISTS ml20m.tags;
+
+CREATE TABLE ml20m.tags
+(
+    userId INT,
+     movieId INT,
+      tag STRING,
+       timestamp TIMESTAMP
+)
+COMMENT 'tags table'
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 1 BUCKETS
+STORED AS ORC;
+
+
+INSERT OVERWRITE TABLE ml20m.tags SELECT userId, movieId, tag, from_unixtime(CAST(unix_timestamp_str as BIGINT)) as timestamp FROM ml20m.data_aux;
+
+----------------------------------------------------------------------
+-- hadoop fs -rm -r -skipTrash /user/cloudera/BDF/ml20m/data/tags.csv
+-- hdfs dfs -put /home/cloudera/Desktop/ml-20m/links.csv /user/cloudera/BDF/ml20m/data
+--Import links.csv file
+DROP TABLE IF EXISTS ml20m.data_aux;
+--(load the data from the .csv file into an external temporary table)
+CREATE EXTERNAL TABLE ml20m.data_aux 
+(
+    movieId INT,
+     imdbId STRING,
+      tmdbId STRING
+)
+COMMENT 'Temporary Table:links'
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/user/cloudera/BDF/ml20m/data'
+TBLPROPERTIES ("skip.header.line.count"="1");
+
+--(move the external table to an internal Hive table)
+-- (to be created on /user/hive/warehouse/)
+DROP TABLE IF EXISTS ml20m.links;
+
+CREATE TABLE ml20m.links
+(
+    movieId INT,
+     imdbId STRING,
+      tmdbId STRING
+)
+COMMENT 'links table'
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 1 BUCKETS
+STORED AS ORC;
+
+INSERT OVERWRITE TABLE ml20m.links SELECT movieId, imdbId, tmdbId FROM ml20m.data_aux;
+
+----------------------------------------------------------------------
+-- hadoop fs -rm -r -skipTrash /user/cloudera/BDF/ml20m/data/links.csv
+-- hdfs dfs -put /home/cloudera/Desktop/ml-20m/movies.csv /user/cloudera/BDF/ml20m/data
+--Import movies.csv file
+DROP TABLE IF EXISTS ml20m.data_aux;
+--(load the data from the .csv file into an external temporary table)
+CREATE EXTERNAL TABLE ml20m.data_aux 
+(
+    movieId INT,
+     title STRING,
+      genres STRING
+)
+COMMENT 'Temporary Table:movies'
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+WITH SERDEPROPERTIES (
+"separatorChar" = ",",
+"quoteChar"="\"",
+"escapeChar"="\\"
+)
+STORED AS TEXTFILE
+LOCATION '/user/cloudera/BDF/ml20m/data'
+TBLPROPERTIES ("skip.header.line.count"="1");
+
+--(move the external table to an internal Hive table)
+-- (to be created on /user/hive/warehouse/)
+DROP TABLE IF EXISTS ml20m.movies;
+
+CREATE TABLE ml20m.movies
+(
+    movieId INT,
+     title STRING,
+      year INT
+)
+COMMENT 'movies table'
+PARTITIONED BY (genre STRING)
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 1 BUCKETS
+STORED AS ORC;
+
+INSERT OVERWRITE TABLE ml20m.movies PARTITION(genre) SELECT movieId, title, cast(regexp_extract(title, '\\(([0-9]{4})\\)',1) as INT) as year, genre
+FROM ml20m.data_aux
+ lateral view explode(split(genres,'\\|')) genres as genre;
+
+----------------------------------------------------------------------
+--Movies_raw: Table without the exploted of genres
+SELECT movieId, title, genres, cast(regexp_extract(title, '\\(([0-9]{4})\\)',1) as INT) as year 
+FROM ml20m.data_aux;
+
+--(move the external table to an internal Hive table)
+-- (to be created on /user/hive/warehouse/)
+DROP TABLE IF EXISTS ml20m.movies_raw;
+
+CREATE TABLE ml20m.movies_raw
+(
+    movieId INT,
+     title STRING,
+      genres STRING
+)
+COMMENT 'movies raw table'
+PARTITIONED BY (year INT)
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 1 BUCKETS
+STORED AS ORC;
+
+
+INSERT OVERWRITE TABLE ml20m.movies_raw PARTITION(year) SELECT movieId, title, genres, cast(regexp_extract(title, '\\(([0-9]{4})\\)',1) as INT) as year 
+FROM ml20m.data_aux;
+
+
+----------------------------------------------------------------------
+-- hadoop fs -rm -r -skipTrash /user/cloudera/BDF/ml20m/data/movies.csv
+-- hdfs dfs -put /home/cloudera/Desktop/ml-20m/genome-tags.csv /user/cloudera/BDF/ml20m/data
+--Import genome-tags.csv file
+DROP TABLE IF EXISTS ml20m.data_aux;
+--(load the data from the .csv file into an external temporary table)
+CREATE EXTERNAL TABLE ml20m.data_aux 
+(
+    tagId INT,
+     tag STRING
+)
+COMMENT 'Temporary Table:genome-tags'
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+WITH SERDEPROPERTIES (
+"separatorChar" = ",",
+"quoteChar"="\"",
+"escapeChar"="\\"
+)
+STORED AS TEXTFILE
+LOCATION '/user/cloudera/BDF/ml20m/data'
+TBLPROPERTIES ("skip.header.line.count"="1");
+
+--(move the external table to an internal Hive table)
+-- (to be created on /user/hive/warehouse/)
+DROP TABLE IF EXISTS ml20m.genome_tags;
+
+CREATE TABLE ml20m.genome_tags
+(
+    tagId INT,
+     tag STRING
+)
+COMMENT 'genome-tags table'
+STORED AS ORC;
+
+
+INSERT OVERWRITE TABLE ml20m.genome_tags SELECT tagId, tag FROM ml20m.data_aux;
+
+----------------------------------------------------------------------
+-- hadoop fs -rm -r -skipTrash /user/cloudera/BDF/ml20m/data/genome-tags.csv
+-- hdfs dfs -put /home/cloudera/Desktop/ml-20m/genome-scores.csv /user/cloudera/BDF/ml20m/data
+--Import genome-scores.csv file
+DROP TABLE IF EXISTS ml20m.data_aux;
+--(load the data from the .csv file into an external temporary table)
+CREATE EXTERNAL TABLE ml20m.data_aux 
+(
+    movieId INT,
+     tagId INT,
+      relevance FLOAT
+)
+COMMENT 'Temporary Table:genome-scores'
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/user/cloudera/BDF/ml20m/data'
+TBLPROPERTIES ("skip.header.line.count"="1");
+
+
+--(move the external table to an internal Hive table)
+-- (to be created on /user/hive/warehouse/)
+DROP TABLE IF EXISTS ml20m.genome_scores;
+
+CREATE TABLE ml20m.genome_scores
+(
+    movieId INT,
+     tagId INT,
+      relevance FLOAT
+)
+COMMENT 'genome-scores table'
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 2 BUCKETS
+STORED AS ORC;
+
+INSERT OVERWRITE TABLE ml20m.genome_scores SELECT movieId, tagId, relevance FROM ml20m.data_aux;
+
+DROP TABLE IF EXISTS ml20m.data_aux;
